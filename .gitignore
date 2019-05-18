@@ -1,0 +1,22 @@
+### Scala ###
+target
+*.class
+*.log
+
+### Intellij ###
+*.iml
+*.ipr
+*.iws
+.idea
+out
+
+### sbt ###
+target/
+.cache
+.history
+.lib/
+dist/*
+lib_managed/
+src_managed/
+project/boot/
+project/plugins/project/%
