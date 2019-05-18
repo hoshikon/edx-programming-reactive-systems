@@ -1,4 +1,6 @@
 ### Scala ###
+async/target
+actorbintree/target
 target
 *.class
 *.log
