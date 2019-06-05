@@ -1,7 +1,7 @@
 package kvstore
 
-import akka.actor.SupervisorStrategy.Restart
-import akka.actor.{Actor, ActorRef, OneForOneStrategy, PoisonPill, Props, SupervisorStrategy, Terminated, Timers}
+import akka.actor.SupervisorStrategy.Resume
+import akka.actor.{Actor, ActorLogging, ActorRef, OneForOneStrategy, PoisonPill, Props, SupervisorStrategy, Terminated, Timers}
 import kvstore.Arbiter._
 import akka.pattern.{ask, pipe}
 
@@ -33,7 +33,7 @@ object Replica {
   def props(arbiter: ActorRef, persistenceProps: Props): Props = Props(new Replica(arbiter, persistenceProps))
 }
 
-class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with Timers {
+class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with Timers with ActorLogging {
   import Replica._
   import Replicator._
   import Persistence._
@@ -48,13 +48,13 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
   var secondaries = Map.empty[ActorRef, ActorRef]
   // the current set of replicators
   var replicators = Set.empty[ActorRef]
-  val persistence = context.system.actorOf(persistenceProps)
+  val persistence = context.actorOf(persistenceProps, "persistence")
   var idToOperationInfo = Map.empty[Long, OperationInfo]
 
   timers.startPeriodicTimer("globalAck", GlobalAckCheck, 100.milliseconds)
 
   override val supervisorStrategy: SupervisorStrategy = OneForOneStrategy() {
-    case _: PersistenceException => Restart
+    case _: PersistenceException => Resume
   }
 
   override def preStart(): Unit = { arbiter ! Join }
@@ -76,8 +76,6 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
     case OperationTimedout(id) => respondToClient(id)(OperationFailed)
   }
 
-  var expectedSeqNumber = 0L
-
   /* TODO Behavior for the replica role. */
   val replica: Receive = {
     case Get(k, id)           => handleGetMsg(k, id)
@@ -98,19 +96,14 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
         (k, None, i)
     }
     idToOperationInfo += (id -> OperationInfo(key, sender, replicators))
-    if (replicators.nonEmpty) {
-      replicators.foreach(_ ! Replicate(key, value, id))
-      timers.startSingleTimer(id, OperationTimedout(id), 1.second)
-    } else {
-      timers.startPeriodicTimer(s"sendPersist$id", Persist(key, kv.get(key), id), 100.milliseconds)
-    }
+    replicators.foreach(_ ! Replicate(key, value, id))
     timers.startSingleTimer(id, OperationTimedout(id), 1.second)
   }
 
   def handleReplicasMsg(replicas: Set[ActorRef]): Unit = {
     val newReplicators = replicas.collect { case r if r != self =>
       secondaries.getOrElse(r, {
-        val replicator = context.system.actorOf(Replicator.props(r))
+        val replicator = context.actorOf(Replicator.props(r))
         secondaries += (r -> replicator)
         replicator
       })
@@ -143,24 +136,30 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
   def respondToClient(id: Long)(msg: Long => OperationReply): Unit = {
     timers.cancel(id)
     timers.cancel(s"sendPersist$id")
-    idToOperationInfo(id).sender ! msg(id)
+    val opInfo = idToOperationInfo(id)
+    opInfo.sender ! msg(id)
     idToOperationInfo -= id
   }
 
   def handleGetMsg(key: String, id: Long): Unit = sender ! GetResult(key, kv.get(key), id)
 
+  private var expectedSeqNumber = 0L
   def handleSnapshotMsg(key: String, valueOption: Option[String], seq: Long): Unit = {
     secondaries += (self -> sender)
     if (seq == expectedSeqNumber) {
       valueOption match {
         case Some(value) => kv += (key -> value)
-        case None => kv -= key
+        case None        => kv -= key
       }
       expectedSeqNumber += 1
-      timers.startPeriodicTimer(s"sendPersist$seq", Persist(key, valueOption, seq), 100.milliseconds)
+      if (!timers.isTimerActive(s"sendPersist$seq")) {
+        timers.startPeriodicTimer(s"sendPersist$seq", Persist(key, valueOption, seq), 100.milliseconds)
+      }
     } else if (seq < expectedSeqNumber) {
       expectedSeqNumber = (seq + 1) max expectedSeqNumber
-      timers.startPeriodicTimer(s"sendPersist$seq", Persist(key, valueOption, seq), 100.milliseconds)
+      if (!timers.isTimerActive(s"sendPersist$seq")) {
+        timers.startPeriodicTimer(s"sendPersist$seq", Persist(key, valueOption, seq), 100.milliseconds)
+      }
     }
   }
 

@@ -36,9 +36,9 @@ class Replicator(val replica: ActorRef) extends Actor with Timers {
   
   /* TODO Behavior for the Replicator. */
   def receive: Receive = {
-    case r: Replicate                             => sendSnapshotMsg(r)
-    case SnapshotAck(k, seq) if seq < _seqCounter => sendReplicatedMsg(k, seq)
-    case s: Snapshot                              => replica ! s
+    case r: Replicate        => sendSnapshotMsg(r)
+    case SnapshotAck(k, seq) => sendReplicatedMsg(k, seq)
+    case s: Snapshot         => replica ! s
   }
 
   def sendSnapshotMsg(r: Replicate): Unit = {
@@ -49,6 +49,8 @@ class Replicator(val replica: ActorRef) extends Actor with Timers {
 
   def sendReplicatedMsg(key: String, seq: Long): Unit = {
     timers.cancel(s"snapshot$seq")
-    acks(seq)._1 ! Replicated(key, acks(seq)._2.id)
+    val (sndr, r) = acks(seq)
+    sndr ! Replicated(key, r.id)
+    acks -= seq
   }
 }
