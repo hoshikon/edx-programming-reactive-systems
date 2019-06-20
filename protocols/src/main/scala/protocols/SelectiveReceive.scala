@@ -17,7 +17,7 @@ object SelectiveReceive {
       *       the `Interceptor` defined below
       */
     def apply[T](bufferSize: Int, initialBehavior: Behavior[T]): Behavior[T] =
-        ???
+        Behaviors.intercept(new Interceptor[T](bufferSize))(initialBehavior)
 
     /**
       * An interceptor that stashes incoming messages unless they are handled by the target behavior.
@@ -31,6 +31,7 @@ object SelectiveReceive {
     private class Interceptor[T](bufferSize: Int) extends BehaviorInterceptor[T, T] {
         import BehaviorInterceptor.{ReceiveTarget, SignalTarget}
 
+        private val buffer = StashBuffer[T](bufferSize)
         /**
           * @param ctx Actor context
           * @param msg Incoming message
@@ -41,7 +42,12 @@ object SelectiveReceive {
             // If the `next` behavior has not handled the incoming `msg`, stash the `msg` and
             // return an unchanged behavior. Otherwise, return a behavior resulting from
             // “unstash-ing” all the stashed messages to the `next` behavior.
-            ???
+            if (Behavior.isUnhandled(next)) {
+                buffer.stash(msg)
+                Behaviors.same
+            } else {
+                buffer.unstashAll(ctx.asScala, apply(bufferSize, next))
+            }
         }
 
         // Forward signals to the target behavior
